@@ -1,12 +1,26 @@
 {
-  "name": "community-smp-hub",
+  "name": "multiplayer-globe-template",
   "main": "src/server/index.ts",
   "compatibility_date": "2025-04-01",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["Globe"],
+      "tag": "v1"
+    }
+  ],
   "assets": {
     "directory": "public"
   },
   "build": {
     "command": "npx esbuild src/client/index.tsx --bundle --outdir=public/dist --splitting --sourcemap --format=esm"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "Globe",
+        "name": "Globe"
+      }
+    ]
   },
   "observability": {
     "enabled": true

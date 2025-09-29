@@ -1,10 +1,86 @@
+import { routePartykitRequest, Server } from "partyserver";
+
 import type {
   ApiOverviewResponse,
   FeedbackRequest,
   FeedbackResponse,
+  OutgoingMessage,
+  Position,
   TicketRequest,
   TicketResponse,
 } from "../shared";
+import type { Connection, ConnectionContext } from "partyserver";
+
+type ConnectionState = {
+  position: Position;
+};
+
+export class Globe extends Server {
+  onConnect(conn: Connection<ConnectionState>, ctx: ConnectionContext) {
+    const latitude = ctx.request.cf?.latitude as string | undefined;
+    const longitude = ctx.request.cf?.longitude as string | undefined;
+
+    if (!latitude || !longitude) {
+      console.warn(`Missing position information for connection ${conn.id}`);
+      return;
+    }
+
+    const position: Position = {
+      lat: parseFloat(latitude),
+      lng: parseFloat(longitude),
+      id: conn.id,
+    };
+
+    conn.setState({
+      position,
+    });
+
+    for (const connection of this.getConnections<ConnectionState>()) {
+      try {
+        conn.send(
+          JSON.stringify({
+            type: "add-marker",
+            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+            position: connection.state!.position,
+          } satisfies OutgoingMessage),
+        );
+
+        if (connection.id !== conn.id) {
+          connection.send(
+            JSON.stringify({
+              type: "add-marker",
+              position,
+            } satisfies OutgoingMessage),
+          );
+        }
+      } catch {
+        this.onCloseOrError(conn);
+      }
+    }
+  }
+
+  onCloseOrError(connection: Connection) {
+    this.broadcast(
+      JSON.stringify({
+        type: "remove-marker",
+        id: connection.id,
+      } satisfies OutgoingMessage),
+      [connection.id],
+    );
+  }
+
+  onClose(connection: Connection): void | Promise<void> {
+    this.onCloseOrError(connection);
+  }
+
+  onError(connection: Connection): void | Promise<void> {
+    this.onCloseOrError(connection);
+  }
+}
+
+type Env = {
+  Globe: DurableObjectNamespace;
+};
 
 const overviewData: ApiOverviewResponse = {
   status: {
@@ -352,62 +428,83 @@ const json = (data: unknown, init: ResponseInit = {}): Response =>
     },
   });
 
-export default {
-  async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
+const handleApiRequest = async (request: Request): Promise<Response | null> => {
+  const url = new URL(request.url);
 
-    if (request.method === "GET" && url.pathname === "/api/overview") {
-      return json(overviewData);
-    }
+  if (!url.pathname.startsWith("/api/")) {
+    return null;
+  }
 
-    if (request.method === "POST" && url.pathname === "/api/support") {
-      try {
-        const body = (await request.json()) as TicketRequest;
-        const reference = `CSP-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-        tickets.push(body);
-        const response: TicketResponse = {
-          success: true,
-          reference,
-          message:
-            "Ticket received! A staff member will respond in-game or via Discord within 24 hours.",
-        };
-        return json(response, { status: 201 });
-      } catch (error) {
-        return json({
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET,POST,OPTIONS",
+        "access-control-allow-headers": "content-type",
+      },
+    });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/overview") {
+    return json(overviewData);
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/support") {
+    try {
+      const body = (await request.json()) as TicketRequest;
+      const reference = `CSP-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+      tickets.push(body);
+      const response: TicketResponse = {
+        success: true,
+        reference,
+        message: "Ticket received! A staff member will respond in-game or via Discord within 24 hours.",
+      };
+      return json(response, { status: 201 });
+    } catch (error) {
+      return json(
+        {
           success: false,
           message: error instanceof Error ? error.message : "Invalid ticket payload.",
-        });
-      }
+        },
+        { status: 400 },
+      );
     }
+  }
 
-    if (request.method === "POST" && url.pathname === "/api/feedback") {
-      try {
-        const body = (await request.json()) as FeedbackRequest;
-        feedbackEntries.push(body);
-        const response: FeedbackResponse = {
-          success: true,
-          message: "Thanks for improving CommunitySMP! Your feedback was logged.",
-        };
-        return json(response, { status: 201 });
-      } catch (error) {
-        return json({
+  if (request.method === "POST" && url.pathname === "/api/feedback") {
+    try {
+      const body = (await request.json()) as FeedbackRequest;
+      feedbackEntries.push(body);
+      const response: FeedbackResponse = {
+        success: true,
+        message: "Thanks for improving CommunitySMP! Your feedback was logged.",
+      };
+      return json(response, { status: 201 });
+    } catch (error) {
+      return json(
+        {
           success: false,
           message: error instanceof Error ? error.message : "Invalid feedback payload.",
-        });
-      }
-    }
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          "access-control-allow-origin": "*",
-          "access-control-allow-methods": "GET,POST,OPTIONS",
-          "access-control-allow-headers": "content-type",
         },
-      });
+        { status: 400 },
+      );
+    }
+  }
+
+  return json({ message: "Not Found" }, { status: 404 });
+};
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const apiResponse = await handleApiRequest(request);
+    if (apiResponse) {
+      return apiResponse;
     }
 
-    return new Response("Not Found", { status: 404 });
+    return (
+      (await routePartykitRequest(request, env)) ||
+      new Response("Not Found", { status: 404 })
+    );
   },
 };
